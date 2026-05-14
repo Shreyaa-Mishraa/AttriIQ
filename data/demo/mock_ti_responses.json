@@ -1,0 +1,186 @@
+{
+  "192.168.10.1": {
+    "vt_malicious": 9,
+    "abuse_score": 82,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "23,2323,80",
+    "shodan_tags": "telnet,router"
+  },
+  "192.168.10.2": {
+    "vt_malicious": 9,
+    "abuse_score": 85,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "23,2323,80",
+    "shodan_tags": "telnet,router"
+  },
+  "192.168.10.3": {
+    "vt_malicious": 8,
+    "abuse_score": 82,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "23,2323,80",
+    "shodan_tags": "telnet,router"
+  },
+  "192.168.10.4": {
+    "vt_malicious": 7,
+    "abuse_score": 89,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "23,2323,80",
+    "shodan_tags": "telnet,router"
+  },
+  "192.168.10.5": {
+    "vt_malicious": 7,
+    "abuse_score": 87,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "23,2323,80",
+    "shodan_tags": "telnet,router"
+  },
+  "192.168.10.6": {
+    "vt_malicious": 7,
+    "abuse_score": 90,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "23,2323,80",
+    "shodan_tags": "telnet,router"
+  },
+  "192.168.10.7": {
+    "vt_malicious": 9,
+    "abuse_score": 85,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "23,2323,80",
+    "shodan_tags": "telnet,router"
+  },
+  "192.168.10.8": {
+    "vt_malicious": 9,
+    "abuse_score": 82,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "23,2323,80",
+    "shodan_tags": "telnet,router"
+  },
+  "192.168.10.9": {
+    "vt_malicious": 7,
+    "abuse_score": 94,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "23,2323,80",
+    "shodan_tags": "telnet,router"
+  },
+  "192.168.10.10": {
+    "vt_malicious": 0,
+    "abuse_score": 0,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "",
+    "shodan_tags": ""
+  },
+  "192.168.10.11": {
+    "vt_malicious": 0,
+    "abuse_score": 0,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "",
+    "shodan_tags": ""
+  },
+  "192.168.10.12": {
+    "vt_malicious": 0,
+    "abuse_score": 0,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "",
+    "shodan_tags": ""
+  },
+  "192.168.10.13": {
+    "vt_malicious": 0,
+    "abuse_score": 0,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "",
+    "shodan_tags": ""
+  },
+  "192.168.10.14": {
+    "vt_malicious": 0,
+    "abuse_score": 0,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "",
+    "shodan_tags": ""
+  },
+  "192.168.10.15": {
+    "vt_malicious": 0,
+    "abuse_score": 0,
+    "asn": "AS64496",
+    "country": "CN",
+    "shodan_ports": "",
+    "shodan_tags": ""
+  },
+  "10.20.0.1": {
+    "vt_malicious": 6,
+    "abuse_score": 45,
+    "asn": "AS64497",
+    "country": "RU",
+    "shodan_ports": "443,8080",
+    "shodan_tags": "https,c2-like"
+  },
+  "10.20.0.2": {
+    "vt_malicious": 5,
+    "abuse_score": 41,
+    "asn": "AS64497",
+    "country": "RU",
+    "shodan_ports": "443,8080",
+    "shodan_tags": "https,c2-like"
+  },
+  "10.20.0.3": {
+    "vt_malicious": 6,
+    "abuse_score": 53,
+    "asn": "AS64497",
+    "country": "RU",
+    "shodan_ports": "443,8080",
+    "shodan_tags": "https,c2-like"
+  },
+  "10.20.0.4": {
+    "vt_malicious": 5,
+    "abuse_score": 40,
+    "asn": "AS64497",
+    "country": "RU",
+    "shodan_ports": "443,8080",
+    "shodan_tags": "https,c2-like"
+  },
+  "10.20.0.5": {
+    "vt_malicious": 5,
+    "abuse_score": 49,
+    "asn": "AS64497",
+    "country": "RU",
+    "shodan_ports": "443,8080",
+    "shodan_tags": "https,c2-like"
+  },
+  "172.31.0.1": {
+    "vt_malicious": 4,
+    "abuse_score": 20,
+    "asn": "AS64498",
+    "country": "BR",
+    "shodan_ports": "22,3389",
+    "shodan_tags": "ssh,rdp"
+  },
+  "172.31.0.2": {
+    "vt_malicious": 4,
+    "abuse_score": 34,
+    "asn": "AS64498",
+    "country": "BR",
+    "shodan_ports": "22,3389",
+    "shodan_tags": "ssh,rdp"
+  },
+  "172.31.0.3": {
+    "vt_malicious": 4,
+    "abuse_score": 30,
+    "asn": "AS64498",
+    "country": "BR",
+    "shodan_ports": "22,3389",
+    "shodan_tags": "ssh,rdp"
+  }
+}

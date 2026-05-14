@@ -1,0 +1,62 @@
+# Attack attribution pipeline configuration (paths relative to project root)
+
+DEMO_MODE: false
+
+demo_paths:
+  - "data/demo/*.binetflow"
+
+ctu13_paths:
+  - "data/*.binetflow"
+  - "data/**/*.binetflow"
+
+iot23_paths:
+  - "data/iot23/*.pcap"
+  - "data/iot23/**/*.pcap"
+  - "data/iot23/*conn.log.labeled*"
+  - "data/iot23/**/*conn.log.labeled*"
+
+# Confidence scoring weights C(k) = w1·B(k) + w2·I(k) + w3·T(k) + w4·M(k)
+attribution_weights:
+  w1: 0.35  # behavioral cohesion B(k)
+  w2: 0.25  # infrastructure overlap I(k)
+  w3: 0.20  # timing correlation T(k)
+  w4: 0.20  # threat intel match M(k)
+
+drift_threshold: 0.15
+drift_window_hours: 6
+
+clustering:
+  method: "kmeans"   # kmeans | agglomerative | hdbscan
+  kmeans:
+    k_min: 2
+    k_max: 10
+    random_state: 42
+  hdbscan:
+    min_cluster_size: 5
+    min_samples: 3
+
+iot_ports: [23, 2323, 7547, 8080, 8443, 5555, 48101, 37215]
+
+api_timeouts_sec: 15
+
+paths:
+  mock_ti: "data/demo/mock_ti_responses.json"
+  whois_cache: "output/whois_cache.json"
+  shodan_cache: "output/shodan_cache.json"
+  misp_matches: "output/misp_matches.json"
+  attack_graph: "output/attack_graph.json"
+  attribution_scores: "output/attribution_scores.json"
+  drift_report: "output/drift_report.json"
+  unified_flows: "output/unified_flows.parquet"
+  features: "output/features_iot_extended.parquet"
+  campaigns: "output/03_campaigns.csv"
+  enriched: "output/04_enriched.csv"
+  cluster_summary: "output/cluster_summary.json"
+
+dashboard:
+  # 0.0.0.0 = listen on all interfaces (still open http://127.0.0.1:PORT locally).
+  # Use 127.0.0.1 only if you want to block LAN access.
+  host: "0.0.0.0"
+  port: 8050
+  # Seconds to wait after starting Dash before opening the browser (server boot time).
+  startup_delay_sec: 2
