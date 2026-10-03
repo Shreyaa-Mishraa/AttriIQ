@@ -120,7 +120,7 @@ export default function IPDetail() {
                   ['IP Address', selected.ip, true],
                   ['Label', selected.label || 'Unknown', false],
                   ['Campaign', `C${selected.campaignId}`, false],
-                  ['Confidence', `${(selected.campaign?.confidence * 100 ?? 0).toFixed(1)}%`, false],
+                  ['Confidence', `${((selected.campaign?.confidence ?? 0) * 100).toFixed(1)}%`, false],
                   ['Flow Count', selected.raw.flow_count?.toLocaleString(), false],
                   ['Avg Bytes', selected.raw.avg_bytes?.toFixed(0), false],
                   ['Avg Packets', selected.raw.avg_pkts?.toFixed(1), false],

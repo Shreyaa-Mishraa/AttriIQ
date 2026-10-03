@@ -114,17 +114,35 @@ GRAPH_CONFIG = {
 }
 
 
-def _replay_seed_indices(flows: pd.DataFrame, camps: pd.DataFrame, clusters: list) -> tuple[int, int, int]:
+# A real capture has millions of distinct timestamps, and the replay timeline is
+# shipped to the browser in a dcc.Store - so sample it down to a usable slider.
+REPLAY_MAX_STEPS = 1500
+
+
+def _replay_timeline(flows: pd.DataFrame) -> list[pd.Timestamp]:
+    """Evenly spaced replay steps across the capture window."""
+    if flows.empty or "StartTime" not in flows.columns:
+        return []
+    ts = pd.to_datetime(flows["StartTime"], errors="coerce").dropna()
+    if ts.empty:
+        return []
+    uniq = np.sort(ts.unique())
+    if len(uniq) > REPLAY_MAX_STEPS:
+        picks = np.unique(np.linspace(0, len(uniq) - 1, REPLAY_MAX_STEPS).round().astype(int))
+        uniq = uniq[picks]
+    return [pd.Timestamp(t) for t in uniq]
+
+
+def _replay_seed_indices(
+    flows: pd.DataFrame, camps: pd.DataFrame, clusters: list, timeline: list
+) -> tuple[int, int, int]:
     """Pick replay slider defaults from flows + campaigns (no fixed IPs)."""
     if not clusters:
         return 0, 0, 0
     anchor_cid = int(clusters[0].get("cluster_id", clusters[0].get("campaign_id", 0)))
-    if flows.empty or "StartTime" not in flows.columns:
+    if flows.empty or "StartTime" not in flows.columns or not timeline:
         return 0, 0, anchor_cid
-    ts_all = pd.to_datetime(flows["StartTime"], errors="coerce").dropna()
-    if ts_all.empty:
-        return 0, 0, anchor_cid
-    uniq = sorted(ts_all.unique().tolist())
+    uniq = timeline
     nmax = max(0, len(uniq) - 1)
     default_idx, peak_idx = 0, min(nmax, max(0, nmax // 2))
     sub_f = flows
@@ -266,8 +284,51 @@ def _build_gantt_figure(agg: pd.DataFrame, camp_attack: dict[int, str]) -> go.Fi
     return fig
 
 
+# The element list is also shipped to the browser in a dcc.Store, so a real
+# capture (>100k source IPs) has to be trimmed before it reaches Cytoscape.
+MAX_IP_NODES_PER_CAMPAIGN = 3000
+
+
+def _cap_ip_nodes(graph: dict) -> dict:
+    """Keep the most central IPs per campaign; other node types are untouched."""
+    nodes = graph.get("nodes") or []
+    ips_by_campaign: dict[object, list[dict]] = {}
+    kept: list[dict] = []
+    for n in nodes:
+        if str(n.get("type", "ip")) == "ip":
+            ips_by_campaign.setdefault(n.get("campaign_id", -1), []).append(n)
+        else:
+            kept.append(n)
+
+    dropped = 0
+    for ips in ips_by_campaign.values():
+        if len(ips) > MAX_IP_NODES_PER_CAMPAIGN:
+            ips = sorted(
+                ips, key=lambda n: float(n.get("degree_centrality") or 0.0), reverse=True
+            )
+            dropped += len(ips) - MAX_IP_NODES_PER_CAMPAIGN
+            ips = ips[:MAX_IP_NODES_PER_CAMPAIGN]
+        kept.extend(ips)
+
+    if not dropped:
+        return graph
+
+    kept_ids = {str(n.get("id")) for n in kept}
+    links = [
+        e
+        for e in (graph.get("links") or [])
+        if str(e.get("source")) in kept_ids and str(e.get("target")) in kept_ids
+    ]
+    print(
+        f"[i] Graph trimmed for display: {len(kept):,} nodes kept, {dropped:,} low-centrality "
+        f"IP nodes dropped (cap {MAX_IP_NODES_PER_CAMPAIGN:,}/campaign)"
+    )
+    return {**graph, "nodes": kept, "links": links}
+
+
 def _elements_from_graph(graph: dict) -> list[dict]:
     """Build cytoscape elements with full node data (campaign_id, relations, etc.)."""
+    graph = _cap_ip_nodes(graph)
     elements: list[dict] = []
     for n in graph.get("nodes", []) or []:
         nid = str(n.get("id"))
@@ -443,12 +504,32 @@ def _replay_ip_only_elements(full_el: list, visible_ip_ids: set[str]) -> list:
     return out
 
 
+DEMO_ARTIFACTS_DIR = "output_demo"
+
+
 def load_cfg() -> dict:
     p = ROOT / "config.yaml"
     if not p.is_file():
         return {}
     with open(p, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
+
+def retarget_artifacts(cfg: dict, artifacts: str) -> dict:
+    """Serve a different artifact directory than the pipeline's default ``output/``.
+
+    Lets a demo-data dashboard stay up while the real pipeline rewrites ``output/``.
+    """
+    artifacts = artifacts.rstrip("/\\")
+    paths = dict(cfg.get("paths") or {})
+    for key, val in paths.items():
+        normalised = str(val).replace("\\", "/")
+        if normalised.startswith("output/"):
+            paths[key] = f"{artifacts}/{normalised.split('/', 1)[1]}"
+    out = {**cfg, "paths": paths}
+    # The badge and PDF header must describe the data actually on screen.
+    out["DEMO_MODE"] = artifacts == DEMO_ARTIFACTS_DIR
+    return out
 
 
 def load_table(path: Path) -> pd.DataFrame:
@@ -583,6 +664,225 @@ def _canvas_wrapped_lines(c, text: str, x: float, y: float, max_width: int, line
     return y
 
 
+def _factor_heatmap_png(campaigns: list[dict]) -> bytes | None:
+    """Render the B/I/T/M factor matrix to PNG so the PDF can embed it."""
+    if not campaigns:
+        return None
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    keys = ["B", "I", "T", "M"]
+    mat = [[float((c.get("contributing_factors") or {}).get(k, 0.0)) for k in keys] for c in campaigns]
+    ylabs = [f"Campaign {c.get('campaign_id')}" for c in campaigns]
+
+    fig, ax = plt.subplots(figsize=(6.4, max(1.8, 0.42 * len(ylabs) + 1.2)))
+    im = ax.imshow(mat, cmap="Blues", vmin=0, vmax=1, aspect="auto")
+    ax.set_xticks(range(len(keys)), ["Behavioral\n(B)", "Infrastructure\n(I)", "Timing\n(T)", "Threat Intel\n(M)"], fontsize=8)
+    ax.set_yticks(range(len(ylabs)), ylabs, fontsize=8)
+    for i, row in enumerate(mat):
+        for j, v in enumerate(row):
+            ax.text(j, i, f"{v * 100:.0f}%", ha="center", va="center", fontsize=8,
+                    color="white" if v > 0.6 else "#0F172A")
+    ax.set_title("Confidence factors by campaign", fontsize=10)
+    fig.colorbar(im, ax=ax, shrink=0.85)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def _build_incident_pdf(payload: dict) -> bytes:
+    """Multi-page incident report: summary, factor heatmap, per-campaign detail, formulas."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas as pdf_canvas
+
+    buf = io.BytesIO()
+    c = pdf_canvas.Canvas(buf, pagesize=A4)
+    width, height = A4
+    margin = 48
+    text_width = int(width - 2 * margin)
+    state = {"page": 0, "y": 0.0}
+
+    def new_page(heading: str = "") -> None:
+        if state["page"]:
+            c.showPage()
+        state["page"] += 1
+        c.setFont("Helvetica-Bold", 9)
+        c.setFillColorRGB(0.145, 0.388, 0.922)
+        c.drawString(margin, height - 34, "AttribIQ - Post-Incident Attack Attribution")
+        c.setFont("Helvetica", 8)
+        c.setFillColorRGB(0.45, 0.45, 0.45)
+        c.drawRightString(width - margin, height - 34, f"Page {state['page']}")
+        c.setStrokeColorRGB(0.88, 0.89, 0.90)
+        c.line(margin, height - 40, width - margin, height - 40)
+        c.setFillColorRGB(0, 0, 0)
+        state["y"] = height - 66
+        if heading:
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(margin, state["y"], heading)
+            state["y"] -= 24
+
+    def ensure(space: float, heading: str = "") -> None:
+        if state["y"] - space < margin:
+            new_page(heading)
+
+    def write(text: str, size: int = 9, bold: bool = False, dy: float = 13.0,
+              color: tuple[float, float, float] = (0, 0, 0)) -> None:
+        c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+        c.setFillColorRGB(*color)
+        c.drawString(margin, state["y"], text)
+        c.setFillColorRGB(0, 0, 0)
+        state["y"] -= dy
+
+    rep = payload.get("report") or {}
+    ds = payload.get("dataset") or {}
+    campaigns = payload.get("campaigns") or []
+
+    # ── Page 1: header block + campaign summary ──────────────────────────
+    new_page("Incident Report")
+    write(f"Generated: {rep.get('generated_at', '')}", 9, color=(0.4, 0.4, 0.4))
+    if rep.get("demo_mode"):
+        write("DATA SOURCE: DEMO MODE - synthetic flows and mocked threat intel", 9, bold=True,
+              color=(0.85, 0.47, 0.02))
+    else:
+        write("DATA SOURCE: live capture with live threat-intel lookups", 9, color=(0.09, 0.64, 0.29))
+    filt = rep.get("filters") or {}
+    write(
+        f"Filters: campaigns={filt.get('campaigns') or 'all'}, min confidence={filt.get('min_confidence_pct', 0)}%",
+        9, color=(0.4, 0.4, 0.4),
+    )
+    state["y"] -= 6
+
+    write("Dataset", 11, bold=True, dy=16)
+    for label, key in (
+        ("Total flows analysed", "total_flows"),
+        ("Unique source IPs", "unique_source_ips"),
+        ("Behavioral fingerprints", "fingerprints"),
+        ("Campaigns detected", "campaigns_total"),
+        ("Campaigns in this report", "campaigns_selected"),
+        ("Enriched IPs", "enriched_ips"),
+    ):
+        val = ds.get(key)
+        if val is not None:
+            write(f"  {label}: {val:,}" if isinstance(val, int) else f"  {label}: {val}")
+    state["y"] -= 8
+
+    write("Campaign summary", 11, bold=True, dy=16)
+    c.setFont("Helvetica-Bold", 8)
+    cols = [(0, "CAMPAIGN"), (80, "CONFIDENCE"), (160, "BAND"), (215, "IPS"), (270, "ATTACK TYPE"), (400, "TTPs"), (480, "DRIFT")]
+    for dx, name in cols:
+        c.drawString(margin + dx, state["y"], name)
+    state["y"] -= 12
+    c.setStrokeColorRGB(0.88, 0.89, 0.90)
+    c.line(margin, state["y"] + 4, width - margin, state["y"] + 4)
+
+    for camp in campaigns:
+        ensure(26, "Campaign summary (continued)")
+        c.setFont("Helvetica", 8)
+        conf = float(camp.get("confidence_pct", 0))
+        band = str(camp.get("confidence_band", ""))
+        rgb = (0.86, 0.15, 0.15) if conf < 50 else ((0.85, 0.47, 0.02) if conf < 75 else (0.09, 0.64, 0.29))
+        c.drawString(margin, state["y"], f"Campaign {camp.get('campaign_id')}")
+        c.setFillColorRGB(*rgb)
+        c.drawString(margin + 80, state["y"], f"{conf:.2f}%")
+        c.drawString(margin + 160, state["y"], band)
+        c.setFillColorRGB(0, 0, 0)
+        c.drawString(margin + 215, state["y"], f"{int(camp.get('ip_count', 0)):,}")
+        c.drawString(margin + 270, state["y"], str(camp.get("attack_type", ""))[:22])
+        c.drawString(margin + 400, state["y"], ", ".join(camp.get("top_ttps") or [])[:14])
+        c.drawString(margin + 480, state["y"], "YES" if camp.get("drift_detected") else "no")
+        state["y"] -= 14
+
+    # ── Factor heatmap ───────────────────────────────────────────────────
+    png = _factor_heatmap_png(campaigns)
+    if png:
+        img = ImageReader(io.BytesIO(png))
+        iw, ih = img.getSize()
+        draw_w = width - 2 * margin
+        draw_h = draw_w * ih / iw
+        ensure(draw_h + 30, "Confidence factor breakdown")
+        state["y"] -= 10
+        c.drawImage(img, margin, state["y"] - draw_h, width=draw_w, height=draw_h, mask="auto")
+        state["y"] -= draw_h + 16
+
+    # ── Per-campaign detail ──────────────────────────────────────────────
+    for camp in campaigns:
+        new_page(f"Campaign {camp.get('campaign_id')} - detail")
+        conf = float(camp.get("confidence_pct", 0))
+        rgb = (0.86, 0.15, 0.15) if conf < 50 else ((0.85, 0.47, 0.02) if conf < 75 else (0.09, 0.64, 0.29))
+        write(f"Confidence C(k) = {conf:.2f}%  ({camp.get('confidence_band', '')})", 11, bold=True, dy=18, color=rgb)
+        write(f"Attack type: {camp.get('attack_type', 'Unknown')}", 9)
+        write(f"Source IPs in campaign: {int(camp.get('ip_count', 0)):,}", 9)
+        write(f"MITRE techniques: {', '.join(camp.get('top_ttps') or []) or 'none mapped'}", 9)
+        write(f"Temporal drift detected: {'yes' if camp.get('drift_detected') else 'no'}", 9)
+        write(f"Cross-dataset: {'yes' if camp.get('cross_dataset') else 'no'}", 9)
+        if camp.get("iot_family"):
+            write(f"IoT family: {camp.get('iot_family')}", 9)
+        state["y"] -= 6
+
+        write("Confidence components", 10, bold=True, dy=15)
+        factors = camp.get("contributing_factors") or {}
+        weights = ((payload.get("formula_registry") or {}).get("confidence_score") or {}).get("weights") or {}
+        names = {
+            "B": ("Behavioral cohesion", "w1"),
+            "I": ("Infrastructure overlap", "w2"),
+            "T": ("Timing correlation", "w3"),
+            "M": ("Threat-intel match", "w4"),
+        }
+        for key, (desc, wkey) in names.items():
+            val = float(factors.get(key, 0.0))
+            wt = float(weights.get(wkey, 0.0))
+            write(f"  {key}(k) {desc:<26} {val:.4f}  x weight {wt:.2f}  = {val * wt:.4f}")
+        state["y"] -= 6
+
+        ips = camp.get("enriched_ips") or []
+        if ips:
+            write(f"Enriched indicators ({len(ips)})", 10, bold=True, dy=15)
+            c.setFont("Helvetica-Bold", 8)
+            for dx, name in ((0, "IP"), (110, "THREAT"), (170, "VT"), (205, "ABUSE"), (255, "ASN"), (320, "ORG / COUNTRY")):
+                c.drawString(margin + dx, state["y"], name)
+            state["y"] -= 12
+            for row in ips:
+                ensure(24, f"Campaign {camp.get('campaign_id')} - indicators (continued)")
+                c.setFont("Helvetica", 8)
+                c.drawString(margin, state["y"], str(row.get("ip", ""))[:20])
+                c.drawString(margin + 110, state["y"], str(row.get("threat_level", ""))[:8])
+                c.drawString(margin + 170, state["y"], str(row.get("vt_malicious", "")))
+                c.drawString(margin + 205, state["y"], str(row.get("abuse_score", "")))
+                c.drawString(margin + 255, state["y"], str(row.get("asn", ""))[:10])
+                org = f"{str(row.get('asn_org', ''))[:28]} / {str(row.get('country', ''))}"
+                c.drawString(margin + 320, state["y"], org)
+                state["y"] -= 12
+        else:
+            write("No enriched indicators for this campaign.", 9, color=(0.45, 0.45, 0.45))
+
+    # ── Formula appendix ─────────────────────────────────────────────────
+    new_page("Appendix - formula registry")
+    registry = payload.get("formula_registry") or {}
+    for name, body in registry.items():
+        ensure(70, "Appendix - formula registry (continued)")
+        write(str(name).replace("_", " ").title(), 11, bold=True, dy=16)
+        if isinstance(body, dict):
+            if body.get("formula"):
+                write(f"  {body['formula']}", 10, bold=True, dy=15)
+            if body.get("description"):
+                state["y"] = _canvas_wrapped_lines(c, f"  {body['description']}", margin, state["y"], text_width, 12)
+            for wk, wv in (body.get("weights") or {}).items():
+                write(f"    {wk} = {wv}")
+            for ck, cv in (body.get("components") or {}).items():
+                ensure(28)
+                state["y"] = _canvas_wrapped_lines(c, f"    {ck}: {cv}", margin, state["y"], text_width, 12)
+        state["y"] -= 8
+
+    c.save()
+    return buf.getvalue()
+
+
 def build_app(cfg: dict) -> Dash:
     demo = bool(cfg.get("DEMO_MODE", False))
     paths = cfg.get("paths") or {}
@@ -639,11 +939,11 @@ def build_app(cfg: dict) -> Dash:
     replay_default_idx = 0
     mirai_peak_idx = 0
     campaign_a_id = int(clusters[0].get("cluster_id", 0)) if clusters else 0
-    if not flows.empty and "StartTime" in flows.columns:
-        ts = pd.to_datetime(flows["StartTime"], errors="coerce").dropna()
-        flow_times = sorted(ts.unique().tolist())
-        if flow_times:
-            replay_default_idx, mirai_peak_idx, campaign_a_id = _replay_seed_indices(flows, camps, clusters)
+    flow_times = _replay_timeline(flows)
+    if flow_times:
+        replay_default_idx, mirai_peak_idx, campaign_a_id = _replay_seed_indices(
+            flows, camps, clusters, flow_times
+        )
 
     ip_first_seen: dict[str, pd.Timestamp] = {}
     if not flows.empty and "SrcAddr" in flows.columns and "StartTime" in flows.columns:
@@ -1053,10 +1353,12 @@ button:focus-visible {{
                 value="tab1",
                 className="attrib-tabs-wrap",
                 children=[
-                    dcc.Tab(label="📊 Overview", value="tab1"),
-                    dcc.Tab(label="🔍 Inspector", value="tab2"),
-                    dcc.Tab(label="🌡 Heatmap", value="tab3"),
-                    dcc.Tab(label="▶ Replay", value="tab4"),
+                    dcc.Tab(label="Overview", value="tab1"),
+                    dcc.Tab(label="Inspector", value="tab2"),
+                    dcc.Tab(label="Heatmap", value="tab3"),
+                    dcc.Tab(label="Replay", value="tab4"),
+                    dcc.Tab(label="Reports", value="tab5"),
+                    dcc.Tab(label="IoT Profiler", value="tab6"),
                 ],
                 style={"maxWidth": "1400px", "margin": "0 auto", "fontFamily": FONT_UI},
                 colors={"border": THEME["card_border"], "primary": THEME["primary"], "background": THEME["card_bg"]},
@@ -1107,6 +1409,8 @@ button:focus-visible {{
                     dcc.Store(id="cyto-elements-full", data=elements),
                     dcc.Store(id="replay-idx", data=replay_default_idx),
                     dcc.Store(id="flash-campaign", data=None),
+                    dcc.Download(id="dl-report-json"),
+                    dcc.Download(id="dl-report-pdf"),
                     dcc.Store(id="heatmap-focus", data=None),
                     dcc.Store(id="subnet-expanded", data=[]),
                     dcc.Store(id="cyto-zoom", data=1.0),
@@ -1731,8 +2035,283 @@ button:focus-visible {{
         if tab == "tab4":
             return html.Div(style={"display": "none"})
 
+        if tab == "tab5":
+            if camp_df.empty:
+                return _empty_state("No campaigns to report on. Run the pipeline first.", "📄")
+            rep_cols = [c for c in ["campaign_id", "attack_type", "n_ips", "confidence_pct", "top_ttp", "drift"] if c in camp_df.columns]
+            return html.Div(
+                [
+                    html.Div(
+                        style={**_card(), "marginBottom": "16px"},
+                        children=[
+                            html.H3("Report filters", style={"margin": "0 0 14px", "fontSize": "15px", "fontFamily": FONT_UI}),
+                            html.Div(
+                                style={"display": "flex", "gap": "20px", "flexWrap": "wrap", "alignItems": "flex-start"},
+                                children=[
+                                    html.Div(
+                                        style={"flex": "1", "minWidth": "300px"},
+                                        children=[
+                                            html.Label("Campaigns (empty = all)", style={"fontSize": "12px", "fontWeight": 600, "color": THEME["text_secondary"]}),
+                                            dcc.Dropdown(
+                                                id="rep-campaigns",
+                                                options=[{"label": f"Campaign {int(c)}", "value": int(c)} for c in camp_df["campaign_id"].tolist()],
+                                                value=[],
+                                                multi=True,
+                                                placeholder="All campaigns",
+                                            ),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        style={"flex": "1", "minWidth": "280px"},
+                                        children=[
+                                            html.Label("Minimum confidence", style={"fontSize": "12px", "fontWeight": 600, "color": THEME["text_secondary"]}),
+                                            dcc.Slider(
+                                                id="rep-min-conf",
+                                                min=0, max=100, step=5, value=0,
+                                                marks={i: f"{i}%" for i in range(0, 101, 25)},
+                                                tooltip={"placement": "bottom", "always_visible": False},
+                                            ),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        style={"minWidth": "220px"},
+                                        children=[
+                                            html.Label("Include", style={"fontSize": "12px", "fontWeight": 600, "color": THEME["text_secondary"]}),
+                                            dcc.Checklist(
+                                                id="rep-include",
+                                                options=[
+                                                    {"label": " Enriched IP indicators", "value": "ips"},
+                                                    {"label": " Temporal drift windows", "value": "drift"},
+                                                ],
+                                                value=["ips", "drift"],
+                                                style={"fontSize": "13px", "fontFamily": FONT_UI},
+                                                inputStyle={"marginRight": "4px"},
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                style={"display": "flex", "gap": "10px", "marginTop": "18px", "alignItems": "center", "flexWrap": "wrap"},
+                                children=[
+                                    html.Button("⬇ Export JSON", id="btn-export-json", n_clicks=0, style=_btn(False)),
+                                    html.Button("📄 Generate Incident Report (PDF)", id="btn-export-pdf", n_clicks=0, style=_btn(True)),
+                                    html.Span(id="rep-status", style={"fontSize": "12px", "color": THEME["text_secondary"], "fontFamily": FONT_MONO}),
+                                ],
+                            ),
+                        ],
+                    ),
+                    html.H3("Campaigns included", style={"fontSize": "16px", "fontFamily": FONT_UI, "marginTop": "4px"}),
+                    dash_table.DataTable(
+                        id="rep-preview",
+                        columns=[{"name": c, "id": c} for c in rep_cols],
+                        data=camp_df[rep_cols].to_dict("records"),
+                        page_size=12,
+                        export_format="none",
+                        style_header={
+                            "backgroundColor": THEME["table_header"],
+                            "color": THEME["text_secondary"],
+                            "fontWeight": "600",
+                            "fontSize": "11px",
+                            "textTransform": "uppercase",
+                            "fontFamily": FONT_UI,
+                            "border": "none",
+                        },
+                        style_cell={
+                            "fontFamily": FONT_MONO,
+                            "fontSize": "12px",
+                            "border": "none",
+                            "borderBottom": f"1px solid {THEME['card_border']}",
+                            "backgroundColor": THEME["card_bg"],
+                            "color": THEME["text"],
+                        },
+                        style_data_conditional=[
+                            {"if": {"row_index": "odd"}, "backgroundColor": THEME["row_hover"]},
+                            {"if": {"filter_query": "{confidence_pct} < 50"}, "color": THEME["danger"], "fontWeight": "700"},
+                            {"if": {"filter_query": "{confidence_pct} >= 75"}, "color": THEME["success"], "fontWeight": "700"},
+                        ],
+                    ),
+                    html.P(
+                        "JSON export contains the full attribution payload (factors, TTPs, drift, indicators). "
+                        "The PDF is a multi-page incident report including the factor heatmap and the formula registry.",
+                        style={"fontSize": "12px", "color": THEME["text_secondary"], "marginTop": "12px", "maxWidth": "760px", "lineHeight": 1.5},
+                    ),
+                ]
+            )
+
+        if tab == "tab6":
+            if camps.empty or not {"scan_entropy", "c2_beacon_score"}.issubset(camps.columns):
+                return _empty_state("Feature columns missing. Re-run phases 02 and 03.", "📡")
+            prof = camps.copy()
+            prof["campaign_id"] = pd.to_numeric(prof.get("campaign_id"), errors="coerce").fillna(-1).astype(int)
+            prof["scan_entropy"] = pd.to_numeric(prof["scan_entropy"], errors="coerce")
+            prof["c2_beacon_score"] = pd.to_numeric(prof["c2_beacon_score"], errors="coerce")
+            prof = prof.dropna(subset=["scan_entropy", "c2_beacon_score"])
+            is_mal = pd.to_numeric(prof.get("label", 0), errors="coerce").fillna(0) > 0
+
+            fig_p = go.Figure()
+            palette = ["#2563EB", "#D97706", "#16A34A", "#7C3AED", "#0891B2", "#DB2777", "#65A30D", "#DC2626"]
+            for i, cid in enumerate(sorted(prof["campaign_id"].unique())):
+                sub = prof[(prof["campaign_id"] == cid) & (~is_mal)]
+                if sub.empty:
+                    continue
+                if len(sub) > 4000:
+                    sub = sub.sample(4000, random_state=42)
+                fig_p.add_trace(
+                    go.Scattergl(
+                        x=sub["scan_entropy"], y=sub["c2_beacon_score"],
+                        mode="markers", name=f"Campaign {int(cid)}",
+                        marker=dict(size=5, opacity=0.55, color=palette[i % len(palette)]),
+                        customdata=sub["SrcAddr"] if "SrcAddr" in sub.columns else None,
+                        hovertemplate="%{customdata}<br>scan entropy=%{x:.3f}<br>beacon score=%{y:.3f}<extra></extra>",
+                    )
+                )
+            mal = prof[is_mal]
+            if not mal.empty:
+                fig_p.add_trace(
+                    go.Scattergl(
+                        x=mal["scan_entropy"], y=mal["c2_beacon_score"],
+                        mode="markers", name=f"Labelled malicious ({len(mal):,})",
+                        marker=dict(size=10, color=THEME["danger"], symbol="x", line=dict(width=1, color="#7F1D1D")),
+                        customdata=mal["SrcAddr"] if "SrcAddr" in mal.columns else None,
+                        hovertemplate="%{customdata}<br>scan entropy=%{x:.3f}<br>beacon score=%{y:.3f}<extra></extra>",
+                    )
+                )
+            fig_p.update_layout(
+                **_plotly_base("Scan entropy vs C2 beacon score", height=560),
+                legend=dict(orientation="h", y=-0.16, font=dict(size=11, family=FONT_UI)),
+            )
+            fig_p.update_xaxes(title_text="Scan entropy H(dst)  -  higher = more destinations probed")
+            fig_p.update_yaxes(title_text="C2 beacon score  -  higher = more regular intervals")
+
+            n_shown = min(len(prof), 4000 * max(1, prof["campaign_id"].nunique()))
+            return html.Div(
+                [
+                    html.Div(style=_card(), children=[dcc.Graph(figure=fig_p, config=GRAPH_CONFIG)]),
+                    html.P(
+                        f"Each point is one source IP in one time window ({len(prof):,} fingerprints; "
+                        f"up to 4,000 sampled per campaign, showing ~{n_shown:,}). Labelled-malicious "
+                        "fingerprints are drawn as red crosses on top. Beaconing hosts cluster high on the "
+                        "y-axis; horizontal scanners push right on the x-axis.",
+                        style={"fontSize": "12px", "color": THEME["text_secondary"], "marginTop": "12px", "maxWidth": "820px", "lineHeight": 1.5},
+                    ),
+                ]
+            )
 
         return _empty_state("Tab not found.", "❓")
+
+    def _report_payload(sel_ids, min_conf, include) -> dict:
+        include = include or []
+        want = {int(s) for s in (sel_ids or [])}
+        floor = float(min_conf or 0)
+
+        rows: list[dict] = []
+        for cl in clusters:
+            cid = int(cl.get("cluster_id", cl.get("campaign_id", -1)))
+            conf = float(cl.get("confidence_pct", 0))
+            if want and cid not in want:
+                continue
+            if conf < floor:
+                continue
+            n_ips = 0
+            if not camps.empty and "SrcAddr" in camps.columns:
+                n_ips = int(camps[camps["campaign_id"] == cid]["SrcAddr"].nunique())
+            row = {
+                "campaign_id": cid,
+                "attack_type": str(cl.get("attack_type", "Unknown")),
+                "confidence_pct": round(conf, 2),
+                "confidence_band": "low" if conf < 50 else ("medium" if conf < 75 else "high"),
+                "contributing_factors": cl.get("contributing_factors") or {},
+                "top_ttps": cl.get("top_ttps") or [],
+                "drift_detected": bool(cl.get("drift_detected", False)),
+                "cross_dataset": bool(cl.get("cross_dataset", False)),
+                "iot_family": cl.get("iot_family"),
+                "ip_count": n_ips,
+            }
+            if "ips" in include and not enr.empty and "campaign_id" in enr.columns:
+                keep = [
+                    c
+                    for c in ["ip", "threat_level", "vt_malicious", "abuse_score", "abuse_isp",
+                              "asn", "asn_org", "country", "technique_id", "technique_name"]
+                    if c in enr.columns
+                ]
+                sub = enr[pd.to_numeric(enr["campaign_id"], errors="coerce") == cid][keep]
+                row["enriched_ips"] = sub.to_dict("records")
+            if "drift" in include:
+                row["drift_windows"] = (drift.get("windows") or {}).get(str(cid), [])
+            rows.append(row)
+
+        total_flows = int(len(flows)) if not flows.empty else 0
+        uniq_src = int(flows["SrcAddr"].nunique()) if not flows.empty and "SrcAddr" in flows.columns else 0
+        return {
+            "report": {
+                "tool": "AttribIQ - Post-Incident Attack Attribution",
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "demo_mode": demo,
+                "filters": {
+                    "campaigns": sorted(want) or None,
+                    "min_confidence_pct": floor,
+                    "include": include,
+                },
+            },
+            "dataset": {
+                "total_flows": total_flows,
+                "unique_source_ips": uniq_src,
+                "fingerprints": int(len(camps)) if not camps.empty else 0,
+                "campaigns_total": len(clusters),
+                "campaigns_selected": len(rows),
+                "enriched_ips": int(enr["ip"].nunique()) if not enr.empty and "ip" in enr.columns else 0,
+            },
+            "formula_registry": att.get("formula_registry") or {},
+            "campaigns": rows,
+            "misp_matches": (misp_data.get("matches") if isinstance(misp_data, dict) else []) or [],
+        }
+
+    @app.callback(
+        Output("dl-report-json", "data"),
+        Output("rep-status", "children"),
+        Input("btn-export-json", "n_clicks"),
+        State("rep-campaigns", "value"),
+        State("rep-min-conf", "value"),
+        State("rep-include", "value"),
+        prevent_initial_call=True,
+    )
+    def export_json(n_clicks, sel_ids, min_conf, include):
+        if not n_clicks:
+            return no_update, no_update
+        payload = _report_payload(sel_ids, min_conf, include)
+        if not payload["campaigns"]:
+            return no_update, "No campaigns match the filters."
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return (
+            dcc.send_string(json.dumps(payload, indent=2, default=str), f"attribiq_export_{stamp}.json"),
+            f"Exported {len(payload['campaigns'])} campaign(s) as JSON.",
+        )
+
+    @app.callback(
+        Output("dl-report-pdf", "data"),
+        Output("rep-status", "children", allow_duplicate=True),
+        Input("btn-export-pdf", "n_clicks"),
+        State("rep-campaigns", "value"),
+        State("rep-min-conf", "value"),
+        State("rep-include", "value"),
+        prevent_initial_call=True,
+    )
+    def export_pdf(n_clicks, sel_ids, min_conf, include):
+        if not n_clicks:
+            return no_update, no_update
+        payload = _report_payload(sel_ids, min_conf, include)
+        if not payload["campaigns"]:
+            return no_update, "No campaigns match the filters."
+        try:
+            pdf_bytes = _build_incident_pdf(payload)
+        except Exception as exc:  # reportlab missing or draw failure
+            return no_update, f"PDF generation failed: {exc!r}"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return (
+            dcc.send_bytes(pdf_bytes, f"attribiq_incident_report_{stamp}.pdf"),
+            f"Incident report ready ({len(pdf_bytes) // 1024} KB, {len(payload['campaigns'])} campaign(s)).",
+        )
 
     @app.callback(
         Output("below-tabs", "style"),
@@ -2193,17 +2772,45 @@ button:focus-visible {{
 
 
 def main() -> None:
+    import argparse
+
     cfg = load_cfg()
-    app = build_app(cfg)
     dash_cfg = cfg.get("dashboard", {}) or {}
+
+    default_artifacts = DEMO_ARTIFACTS_DIR if (ROOT / DEMO_ARTIFACTS_DIR).is_dir() else "output"
+    parser = argparse.ArgumentParser(description="AttribIQ dashboard")
+    parser.add_argument(
+        "--artifacts",
+        default=default_artifacts,
+        help=f"Directory holding pipeline artifacts (default: {default_artifacts})",
+    )
+    parser.add_argument("--port", type=int, default=int(dash_cfg.get("port", 8050)))
+    args = parser.parse_args()
+
+    art_dir = ROOT / args.artifacts
+    if not art_dir.is_dir():
+        print(f"[!] Artifacts directory not found: {art_dir}")
+        print("    Run the pipeline first, or pass --artifacts output")
+        raise SystemExit(1)
+
+    cfg = retarget_artifacts(cfg, args.artifacts)
+    label = "SYNTHETIC DEMO DATA" if cfg["DEMO_MODE"] else "REAL CAPTURE DATA"
+    print(f"[i] Serving artifacts from {args.artifacts}/  ({label})")
+
+    app = build_app(cfg)
     host = str(dash_cfg.get("host", "127.0.0.1"))
-    port = int(dash_cfg.get("port", 8050))
+    port = int(args.port)
     browse = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     print(f"[OK] Starting Dash - listening on {host}:{port}")
     print(f"[OK] Open in your browser (this PC): http://{browse}:{port}/")
     if host in ("0.0.0.0", "::"):
         print("[i] Do not use http://0.0.0.0 in the address bar — use http://127.0.0.1 above (or your machine's LAN IP from another device).")
-    app.run(host=host, port=port, debug=False)
+    try:
+        app.run(host=host, port=port, debug=False)
+    except OSError as e:
+        print(f"[!] Could not bind port {port}: {e}")
+        print(f"[!] Another dashboard is probably already running. Stop it, or use --port {port + 1}.")
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":

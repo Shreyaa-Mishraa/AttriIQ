@@ -65,16 +65,21 @@ def _feat_cols(df: pd.DataFrame) -> list[str]:
 
 
 def behavioral_cohesion(X: np.ndarray) -> float:
-    """B(k): mean pairwise cosine similarity for i<j."""
-    if X.shape[0] < 2:
+    """B(k): mean pairwise cosine similarity for i<j.
+
+    Uses sum_{i,j} u_i·u_j = ||sum u_i||^2 on L2-normalised rows, so the mean is
+    exact without materialising the n x n similarity matrix (n can be >100k).
+    """
+    n = X.shape[0]
+    if n < 2:
         return 0.0
-    sim = cosine_similarity(X)
-    n = sim.shape[0]
-    tri = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            tri.append(float(sim[i, j]))
-    return float(np.mean(tri)) if tri else 0.0
+    U = np.asarray(X, dtype=np.float64)
+    norms = np.linalg.norm(U, axis=1, keepdims=True)
+    U = np.divide(U, norms, out=np.zeros_like(U), where=norms > 0)
+    total = float(np.dot(U.sum(axis=0), U.sum(axis=0)))
+    # Zero rows have self-similarity 0, matching cosine_similarity's convention.
+    diag = float((norms > 0).sum())
+    return (total - diag) / (n * (n - 1))
 
 
 def _asn_key(s: str) -> str:

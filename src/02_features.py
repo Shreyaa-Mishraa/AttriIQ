@@ -11,8 +11,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -299,7 +301,35 @@ def extract_features_for_ip(group: pd.DataFrame, iot_ports: set[int]) -> dict:
     }
 
 
-def extract_features(df: pd.DataFrame, window: str = "1h", iot_ports: set[int] | None = None) -> pd.DataFrame:
+# Below this many groups the process pool costs more than the loop it replaces.
+PARALLEL_MIN_GROUPS = 20_000
+
+
+def _fingerprint_groups(shard: pd.DataFrame, iot_ports: set[int], report: bool = False) -> list[dict]:
+    """Fingerprint every (SrcAddr, time_window) group in one shard of flows."""
+    records: list[dict] = []
+    groups = shard.groupby(["SrcAddr", "time_window"], sort=False)
+    total = len(groups)
+    for i, ((src_ip, time_win), group) in enumerate(groups):
+        if report and i % 500 == 0:
+            print(f"    Processing group {i:,}/{total:,}...", end="\r")
+        feats = extract_features_for_ip(group, iot_ports)
+        feats["SrcAddr"] = src_ip
+        feats["time_window"] = time_win
+        records.append(feats)
+    return records
+
+
+def _shard_worker(payload: tuple[pd.DataFrame, set[int]]) -> list[dict]:
+    return _fingerprint_groups(payload[0], payload[1])
+
+
+def extract_features(
+    df: pd.DataFrame,
+    window: str = "1h",
+    iot_ports: set[int] | None = None,
+    jobs: int = 1,
+) -> pd.DataFrame:
     print(f"[+] Extracting behavioral + IoT features (window={window})...")
 
     if "StartTime" not in df.columns:
@@ -312,20 +342,28 @@ def extract_features(df: pd.DataFrame, window: str = "1h", iot_ports: set[int] |
     df["StartTime"] = pd.to_datetime(df["StartTime"])
     df["time_window"] = df["StartTime"].dt.floor(window)
 
+    n_groups = df.groupby(["SrcAddr", "time_window"], sort=False).ngroups
     records: list[dict] = []
-    groups = df.groupby(["SrcAddr", "time_window"], sort=False)
-    total = len(groups)
 
-    for i, ((src_ip, time_win), group) in enumerate(groups):
-        if i % 500 == 0:
-            print(f"    Processing group {i:,}/{total:,}...", end="\r")
-        feats = extract_features_for_ip(group, iot_ports)
-        feats["SrcAddr"] = src_ip
-        feats["time_window"] = time_win
-        records.append(feats)
+    if jobs > 1 and n_groups >= PARALLEL_MIN_GROUPS:
+        # Shard on SrcAddr so every group stays whole inside one worker.
+        codes = pd.factorize(df["SrcAddr"])[0] % jobs
+        shards = [df[codes == s] for s in range(jobs)]
+        shards = [s for s in shards if not s.empty]
+        print(f"    {n_groups:,} groups across {len(shards)} parallel workers...")
+        with ProcessPoolExecutor(max_workers=len(shards)) as pool:
+            for done, recs in enumerate(
+                pool.map(_shard_worker, [(s, iot_ports) for s in shards]), start=1
+            ):
+                records.extend(recs)
+                print(f"    Worker {done}/{len(shards)} done ({len(records):,} fingerprints)")
+    else:
+        records = _fingerprint_groups(df, iot_ports, report=True)
 
     print(f"\n    Extracted {len(records):,} fingerprints")
     out = pd.DataFrame(records)
+    # Sharding changes arrival order, so fix a stable order for reproducibility.
+    out = out.sort_values(["SrcAddr", "time_window"]).reset_index(drop=True)
     cols = ["SrcAddr", "time_window", "dataset_source"] + FEATURE_COLS + ["label", "attack_type"]
     cols = [c for c in cols if c in out.columns]
     return out[cols]
@@ -367,7 +405,10 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default=str(root / "output" / "features_iot_extended.parquet"))
     parser.add_argument("--output-csv", type=str, default=str(root / "output" / "02_features.csv"))
     parser.add_argument("--window", type=str, default="1h")
+    parser.add_argument("--jobs", type=int, default=0, help="Worker processes; 0 = auto")
     args = parser.parse_args()
+
+    jobs = args.jobs if args.jobs > 0 else min(8, os.cpu_count() or 1)
 
     in_path = Path(args.input) if args.input else None
     if in_path is None or not in_path.is_file():
@@ -380,7 +421,7 @@ if __name__ == "__main__":
     if "StartTime" in df.columns:
         df["StartTime"] = pd.to_datetime(df["StartTime"])
 
-    features_df = extract_features(df, window=args.window, iot_ports=iot_ports)
+    features_df = extract_features(df, window=args.window, iot_ports=iot_ports, jobs=jobs)
     features_df = normalize(features_df)
 
     out_p = Path(args.output)

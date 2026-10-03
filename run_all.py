@@ -62,7 +62,7 @@ def main() -> int:
             ("09", [sys.executable, "src/09_iot_labels.py"]),
             ("07", [sys.executable, "src/07_graph.py"]),
             ("08", [sys.executable, "src/08_misp.py"]),
-            ("05", [sys.executable, "src/05_dashboard.py"]),
+            ("05", [sys.executable, "src/05_dashboard.py", "--artifacts", "output_demo" if demo else "output"]),
         ]
     )
 
@@ -85,6 +85,20 @@ def main() -> int:
         if code != 0:
             print(f"[!] Step {sid} failed with exit code {code}")
             return code
+
+    if demo:
+        # Keep a standalone synthetic snapshot so the demo dashboard survives
+        # the next real run overwriting output/.
+        import shutil
+
+        snap = ROOT / "output_demo"
+        snap.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for item in (ROOT / "output").iterdir():
+            if item.is_file() and item.suffix.lower() not in (".log", ".err"):
+                shutil.copy2(item, snap / item.name)
+                copied += 1
+        print(f"\n[+] Snapshotted {copied} synthetic artifacts -> output_demo/")
 
     # --- Post-run summaries (best-effort) ---------------------------------
     try:

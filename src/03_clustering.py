@@ -87,6 +87,19 @@ def build_clustering_matrix(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return df2, feat_cols
 
 
+# silhouette_score builds an n x n distance matrix; subsample above this size.
+SILHOUETTE_SAMPLE_CAP = 20_000
+
+
+def scalable_silhouette(X: np.ndarray, labels: np.ndarray) -> float:
+    n = len(labels)
+    if n > SILHOUETTE_SAMPLE_CAP:
+        return float(
+            silhouette_score(X, labels, sample_size=SILHOUETTE_SAMPLE_CAP, random_state=42)
+        )
+    return float(silhouette_score(X, labels))
+
+
 def find_optimal_k(X: np.ndarray, k_range: tuple[int, int] = (2, 10)) -> int:
     lo, hi = k_range
     n = len(X)
@@ -102,7 +115,7 @@ def find_optimal_k(X: np.ndarray, k_range: tuple[int, int] = (2, 10)) -> int:
         labels = km.fit_predict(X)
         if len(set(labels)) < 2:
             continue
-        score = silhouette_score(X, labels)
+        score = scalable_silhouette(X, labels)
         scores[k] = score
         print(f"    k={k:2d}  silhouette={score:.4f}")
 
@@ -346,7 +359,7 @@ if __name__ == "__main__":
     db = float("nan")
     try:
         if len(np.unique(labels)) > 1:
-            sil = float(silhouette_score(X_scaled, labels))
+            sil = scalable_silhouette(X_scaled, labels)
             db = float(davies_bouldin_score(X_scaled, labels))
         print(f"[i] Silhouette={sil:.4f} | Davies-Bouldin={db:.4f}")
     except Exception as e:

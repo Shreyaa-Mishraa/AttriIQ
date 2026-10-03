@@ -1,5 +1,8 @@
 # Attack attribution pipeline configuration (paths relative to project root)
 
+# false = terminal pipeline runs on the real CTU-13 scenarios below.
+# true  = synthetic run; artifacts are also snapshotted into output_demo/.
+# The dashboard serves output_demo/ unless started with --artifacts output.
 DEMO_MODE: false
 
 demo_paths:
@@ -8,6 +11,14 @@ demo_paths:
 ctu13_paths:
   - "data/*.binetflow"
   - "data/**/*.binetflow"
+  # Bot-dense CTU-13 scenarios extracted next to the project: 4/10/11 Rbot,
+  # 5 Virut, 7 Sogou, 12 NSIS.ay - ~18 infected hosts across 4 families.
+  - "../CTU-13-Dataset/4/*.binetflow"
+  - "../CTU-13-Dataset/5/*.binetflow"
+  - "../CTU-13-Dataset/7/*.binetflow"
+  - "../CTU-13-Dataset/10/*.binetflow"
+  - "../CTU-13-Dataset/11/*.binetflow"
+  - "../CTU-13-Dataset/12/*.binetflow"
 
 iot23_paths:
   - "data/iot23/*.pcap"

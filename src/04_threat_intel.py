@@ -120,8 +120,8 @@ def query_abuseipdb(ip: str, timeout: int) -> dict:
             return {
                 "abuse_score": d.get("abuseConfidenceScore", 0),
                 "abuse_reports": d.get("totalReports", 0),
-                "abuse_isp": d.get("isp", "")[:80],
-                "abuse_usage_type": d.get("usageType", ""),
+                "abuse_isp": str(d.get("isp") or "")[:80],
+                "abuse_usage_type": d.get("usageType") or "",
             }
         return {"abuse_score": -1, "abuse_reports": -1, "abuse_isp": f"HTTP_{resp.status_code}", "abuse_usage_type": ""}
     except Exception as e:
@@ -287,6 +287,17 @@ def enrich_ip(
     }
 
 
+def _prioritise_ips(sub: pd.DataFrame) -> list[str]:
+    """Order a campaign's source IPs so the --max-ips budget goes to the interesting ones.
+
+    Labelled-malicious first, then busiest, since a campaign can hold >100k IPs.
+    """
+    sort_cols = [c for c in ("label", "conn_count") if c in sub.columns]
+    if sort_cols:
+        sub = sub.sort_values(sort_cols, ascending=False)
+    return sub["SrcAddr"].astype(str).drop_duplicates().tolist()
+
+
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     cfg = _cfg(root)
@@ -320,7 +331,7 @@ def main() -> None:
     for _, row in summary.iterrows():
         c_id = int(row["campaign_id"])
         c_type = str(row.get("campaign_type", "Benign / Unknown"))
-        ips = df[df["campaign_id"] == c_id]["SrcAddr"].astype(str).unique().tolist()
+        ips = _prioritise_ips(df[df["campaign_id"] == c_id])
         if not ips:
             continue
         for ip in ips[: args.max_ips]:

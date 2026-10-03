@@ -63,13 +63,24 @@ def build_graph(camps: pd.DataFrame, enr: pd.DataFrame) -> nx.DiGraph:
     return g
 
 
+# Exact betweenness is O(V*E); above this node count use pivot sampling instead.
+BETWEENNESS_EXACT_CAP = 5_000
+BETWEENNESS_PIVOTS = 500
+
+
 def annotate_centralities(G: nx.DiGraph) -> None:
     """Attach degree_centrality and betweenness_centrality to each node (in-place)."""
-    if G.number_of_nodes() == 0:
+    n_nodes = G.number_of_nodes()
+    if n_nodes == 0:
         return
     try:
         deg = nx.degree_centrality(G)
-        bet = nx.betweenness_centrality(G, normalized=True)
+        if n_nodes > BETWEENNESS_EXACT_CAP:
+            pivots = min(BETWEENNESS_PIVOTS, n_nodes)
+            print(f"[i] Approximating betweenness with {pivots} pivots ({n_nodes:,} nodes)")
+            bet = nx.betweenness_centrality(G, k=pivots, normalized=True, seed=42)
+        else:
+            bet = nx.betweenness_centrality(G, normalized=True)
     except Exception:
         return
     for n in G.nodes:

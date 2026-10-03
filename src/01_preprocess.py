@@ -305,12 +305,13 @@ def load_config_paths(config_path: str) -> tuple[list[str], list[str], list[str]
     )
 
 
-def expand_inputs(patterns: Iterable[str], root: Path) -> list[Path]:
+def expand_inputs(patterns: Iterable[str], root: Path, exclude: Iterable[Path] = ()) -> list[Path]:
+    skip = {Path(p).resolve() for p in exclude}
     out: list[Path] = []
     for pat in patterns:
         for m in glob.glob(str(root / pat), recursive=True):
             p = Path(m)
-            if p.is_file():
+            if p.is_file() and p.resolve() not in skip:
                 out.append(p)
     return sorted(set(out))
 
@@ -487,11 +488,16 @@ if __name__ == "__main__":
         cfg = load_yaml_config(Path(args.config))
         demo_mode = bool(cfg.get("DEMO_MODE", False))
         ctu_pats, iot_pats, demo_pats = load_config_paths(args.config)
+        # Demo files live under data/, so keep them out of the real-dataset globs.
+        demo_files = expand_inputs(demo_pats, root)
         if demo_mode:
-            frames.extend(auto_detect_load(str(p)) for p in expand_inputs(demo_pats, root))
-        frames.extend(auto_detect_load(str(p)) for p in expand_inputs(ctu_pats, root))
-        frames.extend(auto_detect_load(str(p)) for p in expand_inputs(iot_pats, root))
+            frames.extend(auto_detect_load(str(p)) for p in demo_files)
+        frames.extend(auto_detect_load(str(p)) for p in expand_inputs(ctu_pats, root, exclude=demo_files))
+        frames.extend(auto_detect_load(str(p)) for p in expand_inputs(iot_pats, root, exclude=demo_files))
         if not frames and demo_pats:
+            print("[!] WARNING: no CTU-13 / IoT-23 files matched the config globs.")
+            print("[!] Falling back to SYNTHETIC demo data - results are not from a real dataset.")
+            print(f"[!] Checked: {ctu_pats + iot_pats} (relative to {root})")
             frames.extend(auto_detect_load(str(p)) for p in expand_inputs(demo_pats, root))
 
     if frames:

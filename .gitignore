@@ -32,6 +32,8 @@ yarn-error.log*
 # ── Pipeline outputs (generated, not source) ──────────────────
 output/
 !output/.gitkeep
+# Synthetic snapshot the demo dashboard serves; rebuilt by a DEMO_MODE run.
+output_demo/
 
 # ── Data files (can be large / sensitive) ─────────────────────
 data/demo/*.binetflow
