@@ -55,6 +55,18 @@ def _load_iot_ports(root: Path) -> set[int]:
     return {int(p) for p in ports}
 
 
+def _numeric_col(frame: pd.DataFrame, name: str) -> pd.Series:
+    """Numeric view of ``name``, or an aligned zero column when it is absent.
+
+    ``frame.get(name, 0)`` returns a bare int for a missing column, which has no
+    Series methods - datasets without Sport/SrcBytes (Zeek, CICFlowMeter) used to
+    crash feature extraction here.
+    """
+    if name not in frame.columns:
+        return pd.Series(0.0, index=frame.index, dtype=float)
+    return pd.to_numeric(frame[name], errors="coerce").fillna(0.0)
+
+
 def compute_scan_entropy(flows_df: pd.DataFrame) -> float:
     """
     Scan entropy over destination addresses.
@@ -107,8 +119,8 @@ def compute_payload_asymmetry(flows_df: pd.DataFrame) -> float:
     """
     if flows_df is None or flows_df.empty:
         return 1.0
-    sb = pd.to_numeric(flows_df.get("SrcBytes", 0), errors="coerce").fillna(0.0)
-    db = pd.to_numeric(flows_df.get("DstBytes", 0), errors="coerce").fillna(0.0)
+    sb = _numeric_col(flows_df, "SrcBytes")
+    db = _numeric_col(flows_df, "DstBytes")
     ms = float(sb.mean())
     md = float(db.mean())
     if md <= 1e-9:
@@ -208,9 +220,7 @@ def extract_features_for_ip(group: pd.DataFrame, iot_ports: set[int]) -> dict:
     proto_entropy = compute_entropy(group["Proto"]) if "Proto" in group else 0.0
 
     if "TotBytes" not in group.columns:
-        sb = pd.to_numeric(group.get("SrcBytes", 0), errors="coerce").fillna(0)
-        db = pd.to_numeric(group.get("DstBytes", 0), errors="coerce").fillna(0)
-        tot_b = sb + db
+        tot_b = _numeric_col(group, "SrcBytes") + _numeric_col(group, "DstBytes")
     else:
         tot_b = pd.to_numeric(group["TotBytes"], errors="coerce").fillna(0)
 
@@ -232,7 +242,7 @@ def extract_features_for_ip(group: pd.DataFrame, iot_ports: set[int]) -> dict:
     else:
         burst_score = 0.0
 
-    src_bytes = pd.to_numeric(group.get("SrcBytes", 0), errors="coerce").fillna(0).sum()
+    src_bytes = float(_numeric_col(group, "SrcBytes").sum())
     total_bytes = float(tot_b.sum()) if len(tot_b) else 1.0
     src_bytes_ratio = src_bytes / total_bytes if total_bytes > 0 else 0.0
 
@@ -242,7 +252,7 @@ def extract_features_for_ip(group: pd.DataFrame, iot_ports: set[int]) -> dict:
     elif "Label" in group.columns:
         label = int(pd.to_numeric(group["Label"], errors="coerce").fillna(0).mode().iloc[0])
 
-    sport_vals = pd.to_numeric(group.get("Sport", 0), errors="coerce").fillna(0)
+    sport_vals = _numeric_col(group, "Sport")
     low = (sport_vals < 1024).sum()
     high = (sport_vals > 1024).sum()
     denom = low + high
